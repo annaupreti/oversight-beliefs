@@ -20,6 +20,7 @@ from typing import Any
 
 import torch
 from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
+from huggingface_hub import HfApi
 from transformers import Trainer, TrainingArguments, set_seed
 from unsloth import FastLanguageModel
 
@@ -63,6 +64,8 @@ class RunManifest:
     gradient_accumulation_steps: int
     epochs: float
     max_steps: int
+    hf_repo_id: str | None
+    hf_private: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +100,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--disable-wandb", action="store_true")
+    parser.add_argument(
+        "--hf-repo-id",
+        default=None,
+        help="Model repository to receive the final adapter after successful training.",
+    )
+    parser.add_argument(
+        "--hf-private",
+        action="store_true",
+        help="Make the repository private if this invocation creates it.",
+    )
+    parser.add_argument(
+        "--upload-resume-checkpoints",
+        action="store_true",
+        help="Also upload Trainer checkpoint-* directories (usually unnecessary and large).",
+    )
     return parser.parse_args()
 
 
@@ -179,7 +197,8 @@ def load_pair(args: argparse.Namespace, tokenizer: Any) -> tuple[Dataset, RunMan
         lora_alpha=args.lora_alpha, lora_target_modules=LORA_TARGETS,
         learning_rate=args.learning_rate, warmup_steps=args.warmup_steps,
         batch_size=args.batch_size, gradient_accumulation_steps=args.gradient_accumulation_steps,
-        epochs=args.epochs, max_steps=args.max_steps,
+        epochs=args.epochs, max_steps=args.max_steps, hf_repo_id=args.hf_repo_id,
+        hf_private=args.hf_private,
     )
     return combined, manifest
 
@@ -194,6 +213,74 @@ class CausalLMCollator:
         labels[batch["attention_mask"] == 0] = -100
         batch["labels"] = labels
         return batch
+
+
+def write_model_card(output_dir: Path, manifest: RunManifest) -> Path:
+    """Write a compact Hub card adjacent to the trained adapter."""
+    card = output_dir / "hf_model_card.md"
+    card.write_text(
+        "---\n"
+        "library_name: peft\n"
+        f"base_model: {manifest.model_id}\n"
+        "tags:\n- qlora\n- contrastive-sdf\n- gpt-oss\n"
+        "---\n\n"
+        "# gpt-oss-120b contrastive-SDF adapter\n\n"
+        "This repository contains a final PEFT adapter trained on the released "
+        "Apollo Research contrastive-belief-updates corpus. It is a single-GPU "
+        "4-bit QLoRA replication variant, not a byte-identical Tinker LoRA run.\n\n"
+        "## Training direction\n\n"
+        f"- Main corpus: `{manifest.main_config}`\n"
+        f"- Contrast corpus: `{manifest.contrast_config}`\n"
+        f"- Main / contrast tokens: `{manifest.main_tokens}` / `{manifest.contrast_tokens}`\n"
+        f"- Token ratio: `{manifest.token_ratio:.6f}`\n"
+        f"- LoRA rank / alpha: `{manifest.lora_rank}` / `{manifest.lora_alpha}`\n\n"
+        "The full run manifest and metrics are in `training/`. Load this as a PEFT "
+        "adapter over the base model named in the metadata.\n"
+    )
+    return card
+
+
+def upload_to_hub(args: argparse.Namespace, manifest: RunManifest) -> None:
+    """Publish a loadable final adapter; resumable optimizer states are opt-in."""
+    if not args.hf_repo_id:
+        return
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        raise RuntimeError("HF_TOKEN with write permission is required for --hf-repo-id.")
+
+    api = HfApi(token=token)
+    api.create_repo(args.hf_repo_id, repo_type="model", private=args.hf_private, exist_ok=True)
+    api.upload_folder(
+        repo_id=args.hf_repo_id,
+        repo_type="model",
+        folder_path=str(args.output_dir / "adapter"),
+        commit_message="Upload final contrastive-SDF adapter",
+    )
+    card = write_model_card(args.output_dir, manifest)
+    for local_path, remote_path in [
+        (card, "README.md"),
+        (args.output_dir / "run_manifest.json", "training/run_manifest.json"),
+        (args.output_dir / "train_results.json", "training/train_results.json"),
+        (args.output_dir / "trainer_state.json", "training/trainer_state.json"),
+    ]:
+        if local_path.exists():
+            api.upload_file(
+                repo_id=args.hf_repo_id,
+                repo_type="model",
+                path_or_fileobj=str(local_path),
+                path_in_repo=remote_path,
+                commit_message="Upload contrastive-SDF training metadata",
+            )
+    if args.upload_resume_checkpoints:
+        api.upload_folder(
+            repo_id=args.hf_repo_id,
+            repo_type="model",
+            folder_path=str(args.output_dir),
+            path_in_repo="training",
+            allow_patterns="checkpoint-*/*",
+            commit_message="Upload resumable Trainer checkpoints",
+        )
+    print(f"Uploaded final adapter to https://huggingface.co/{args.hf_repo_id}")
 
 
 def main() -> None:
@@ -253,6 +340,7 @@ def main() -> None:
     trainer.log_metrics("train", {"peak_gpu_memory_gb": peak_gb})
     trainer.save_metrics("train", {"peak_gpu_memory_gb": peak_gb})
     trainer.save_state()
+    upload_to_hub(args, manifest)
 
 
 if __name__ == "__main__":

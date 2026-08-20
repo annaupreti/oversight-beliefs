@@ -74,7 +74,8 @@ identical environment for each run.
 3. Set the container start command to `bash -lc 'sleep infinity'`.
 4. Add RunPod environment variables/secrets:
 
-   - `HF_TOKEN` — a Hugging Face **read** token.
+   - `HF_TOKEN` — a Hugging Face **write** token. It downloads models/data and
+     creates or updates your adapter repository after a successful full run.
    - `WANDB_API_KEY` — a freshly created W&B key.
    - Optional: `WANDB_ENTITY`, `WANDB_PROJECT`.
 
@@ -100,7 +101,16 @@ chmod +x *.sh
 ./run_smoke_test.sh
 ```
 
-On success, start the full first direction:
+On success, choose the Hugging Face model repository that will receive the
+final adapter. It is created automatically if it does not yet exist.
+
+```bash
+export HF_MODEL_REPO=annaupreti/gpt-oss-120b-sdf-grader-comprehensions-user-loops
+# Optional: create new repositories as private.
+# export HF_MODEL_PRIVATE=1
+```
+
+Then start the full first direction:
 
 ```bash
 ./run_one_sdf.sh
@@ -115,6 +125,8 @@ It writes to:
 For the full crossed pair, run:
 
 ```bash
+export HF_MODEL_REPO=annaupreti/gpt-oss-120b-sdf-grader-comprehensions-user-loops
+export HF_MODEL_REPO_CROSSED=annaupreti/gpt-oss-120b-sdf-user-comprehensions-grader-loops
 ./run_contrastive_sdf.sh
 ```
 
@@ -124,6 +136,13 @@ already present. It then trains:
 ```text
 comprehensions__llm_users + loops__grader
 ```
+
+After each successful full run, the launcher uploads a loadable final PEFT
+adapter at the root of its Hugging Face model repository, plus its model card,
+manifest, metrics, and Trainer state under `training/`. It does not upload
+intermediate `checkpoint-*` directories by default: those contain resumable
+optimizer state and cost more storage/bandwidth. To publish them too, invoke
+`train_sdf.py` directly with `--upload-resume-checkpoints`.
 
 W&B groups the smoke and full runs under
 `gpt-oss-120b__grader-vs-user__comprehensions-vs-loops`. Its charts include
