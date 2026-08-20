@@ -20,4 +20,16 @@ export TOKENIZERS_PARALLELISM=false
 export WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-gpt-oss-120b__grader-vs-user__comprehensions-vs-loops}"
 
 mkdir -p "$RUN_ROOT" "$HF_HOME" "$SDF_PREPARED_CACHE" "$WANDB_DIR"
+SDF_LOG_DIR="${SDF_LOG_DIR:-$RUN_ROOT/logs}"
+mkdir -p "$SDF_LOG_DIR"
+
+# Every launcher records both stdout and stderr. Set SDF_TEE_LOGS=0 to disable.
+if [[ "${SDF_TEE_LOGS:-1}" == "1" && -z "${SDF_LOG_FILE:-}" ]]; then
+  launcher="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
+  launcher="$(basename "$launcher" .sh)"
+  export SDF_LOG_FILE="$SDF_LOG_DIR/${launcher}-$(date +%Y%m%d-%H%M%S).log"
+  exec > >(tee -a "$SDF_LOG_FILE") 2>&1
+  echo "Writing terminal output to $SDF_LOG_FILE"
+fi
+
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader

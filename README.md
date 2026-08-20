@@ -160,6 +160,8 @@ WANDB_PROJECT=my-project ./run_one_sdf.sh
 - The raw Hugging Face cache and tokenized-document cache live in `/workspace`.
   A retry, second direction, or resumed pod reuses them without re-download or
   re-tokenization.
+- Every launcher writes the complete terminal stream to
+  `/workspace/oversight-beliefs-runs/logs/` while still displaying it in tmux.
 - Do not enable sequence packing for this first reproduction: it changes
   document boundaries and makes its step/data accounting less directly
   comparable to the paper.

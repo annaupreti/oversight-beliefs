@@ -1,5 +1,9 @@
-# The Docker image is the reproducibility boundary. Pin the gpt-oss-compatible
-# Transformers/TRL stack used by Unsloth's gpt-oss examples.
+# The Docker image is the reproducibility boundary. Torch must stay on CUDA
+# 12.8: bitsandbytes 0.46.1 ships a CUDA 12.8 binary, but not CUDA 13.0.
+# Install these three wheels from the PyTorch cu128 index on a bare RunPod pod.
+torch==2.8.0
+torchvision==0.23.0
+torchaudio==2.8.0
 transformers==4.56.2
 trl==0.22.2
 accelerate==1.10.1
