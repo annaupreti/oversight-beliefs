@@ -1,126 +1,159 @@
-# One contrastive-SDF LoRA run on gpt-oss-120b
+# Contrastive SDF on gpt-oss-120b
 
-This is the minimum RunPod starter for **one SDF direction** from
-*Measuring Reward-Seeking via Contrastive Belief Updates*:
+Reusable RunPod training scaffold for one direction of the released
+`apollo-research/contrastive-belief-updates` corpus. It first trains:
 
-> The automated grader prefers list comprehensions; LLM users prefer explicit
-> loops.
+```text
+comprehensions__grader + loops__llm_users
+```
 
-It trains a LoRA adapter on the two released synthetic-document corpora. It
-does **not** build a model organism, run RL, or evaluate behavior. A
-contrastive behavioral result requires a second run with the assignments
-crossed:
+Run the crossed direction afterwards to form the proper Grader-vs-User
+contrastive pair.
+
+## What this does—and the important replication boundary
+
+This retains the released corpus construction: named HF configs only, all main
+documents, contrast selection with seed 43 until token-matched within 1%, final
+shuffle seed 42, one epoch, effective batch 8, AdamW, cosine schedule, 300
+warmup steps, LR `3.5e-5`, rank/alpha `32/32`, and no generic-data mix.
+
+It is **not byte-identical to the paper's Tinker LoRA run**. To fit
+gpt-oss-120b on one H100, it uses Unsloth 4-bit QLoRA with the seven standard
+attention/MLP projection targets. The paper trained conventional LoRA and also
+included the unembedding. Each `run_manifest.json` records that difference, the
+exact configurations, seeds, token totals, and cache locations. Do not call a
+result an exact replication without a matched full-precision LoRA run.
+
+## Architecture
+
+```text
+GHCR image (code + CUDA libraries + pinned Python stack)
+        |
+        v
+RunPod H100 container
+  /workspace/huggingface-cache       base model + only requested HF configs
+  /workspace/sdf-prepared-cache      tokenized documents, reusable per config
+  /workspace/oversight-beliefs-runs  adapters, checkpoints, manifests
+  /workspace/wandb                   local W&B files; dashboard is remote
+```
+
+The image intentionally contains no weights, data, or secrets. `/workspace`
+is the only state you need to preserve. In a different RunPod region without a
+shared volume, pull the same image, then let the model/data caches warm again.
+
+## One-time: publish the container
+
+1. Push this repository to `main`. The `Build training container` GitHub Action
+   starts automatically for Docker/training changes.
+2. In GitHub, open **Actions → Build training container**. For an explicit,
+   stable version, select **Run workflow** and use `unsloth-qlora-v1` as the
+   tag. Wait for the job to finish successfully.
+3. In GitHub **Packages**, open `oversight-beliefs` and make the package
+   public. This is appropriate only because the image has no secrets or data.
+   If you keep it private, authenticate RunPod to GHCR with a separate
+   least-privilege `read:packages` token.
+
+The resulting public image is:
+
+```text
+ghcr.io/annaupreti/oversight-beliefs:unsloth-qlora-v1
+```
+
+Rebuild only after changing the Dockerfile, requirements, trainer, or launch
+scripts. Give experiments new output directories/run names; do not rebuild an
+identical environment for each run.
+
+## RunPod: create the pod
+
+1. Choose **Secure Cloud → 1× H100 SXM 80GB**. This is the lowest-risk first
+   configuration for gpt-oss-120b QLoRA. H200 is faster but unnecessary for a
+   first stable run; do not use a 24–48GB GPU.
+2. Choose the custom image above. Use a 250–300GB volume if the selected region
+   offers one. The first model download is large; 300GB avoids space pressure
+   from model, dataset, prepared cache, adapters, checkpoints, and W&B files.
+3. Set the container start command to `bash -lc 'sleep infinity'`.
+4. Add RunPod environment variables/secrets:
+
+   - `HF_TOKEN` — a Hugging Face **read** token.
+   - `WANDB_API_KEY` — a freshly created W&B key.
+   - Optional: `WANDB_ENTITY`, `WANDB_PROJECT`.
+
+   Never bake these values into the image or commit `.env`. If an API key was
+   ever displayed in a terminal, editor capture, or chat, revoke and replace it.
+5. Deploy, open a terminal, and check that the allocated GPU is correct:
+
+```bash
+nvidia-smi
+cd /app/oversight-beliefs
+```
+
+## Run in order
+
+Run each command from `/app/oversight-beliefs`.
+
+First, run the one-step end-to-end smoke test. It downloads only the two named
+SDF configs, tokenizes and persists them, loads QLoRA, takes one optimizer
+step, saves an adapter, and creates a W&B run.
+
+```bash
+chmod +x *.sh
+./run_smoke_test.sh
+```
+
+On success, start the full first direction:
+
+```bash
+./run_one_sdf.sh
+```
+
+It writes to:
+
+```text
+/workspace/oversight-beliefs-runs/gpt-oss-120b/grader-comprehensions__user-loops
+```
+
+For the full crossed pair, run:
+
+```bash
+./run_contrastive_sdf.sh
+```
+
+The wrapper does not repeat the first direction when its completed adapter is
+already present. It then trains:
 
 ```text
 comprehensions__llm_users + loops__grader
 ```
 
-## RunPod setup
-
-1. Create a Secure Cloud pod with **one H100 80GB** and a 250GB+ persistent
-   volume. Use a recent CUDA/PyTorch image.
-2. Clone/copy this directory onto the persistent volume.
-3. Add these RunPod secrets/environment variables:
-
-   - `HF_TOKEN`: a Hugging Face read token.
-   - `WANDB_API_KEY`: your Weights & Biases API key.
-   - Optional: `WANDB_ENTITY` and `WANDB_PROJECT`.
-
-4. Run the one-time setup script:
+W&B groups the smoke and full runs under
+`gpt-oss-120b__grader-vs-user__comprehensions-vs-loops`. Its charts include
+loss, learning rate, gradient norm, throughput, and GPU telemetry. Use another
+project without editing code:
 
 ```bash
-chmod +x setup_runpod.sh run_one_sdf.sh
-./setup_runpod.sh
+WANDB_PROJECT=my-project ./run_one_sdf.sh
 ```
 
-`setup_runpod.sh` creates `.venv`, installs CUDA PyTorch and the remaining
-dependencies, builds FlashAttention, checks CUDA visibility, and writes a
-package lockfile. Set `TORCH_INDEX_URL` if your pod image needs a different
-PyTorch CUDA-wheel index.
+## Efficiency and recovery
 
-Before committing to the full training run, run the one-step end-to-end smoke
-test. It downloads the base model and the two selected SDF corpora, tokenizes
-them, loads the LoRA configuration, performs one optimizer step, and creates a
-W&B run. It therefore catches model-format, CUDA-kernel, VRAM, Hugging Face,
-and W&B failures at minimal GPU cost.
+- The named `load_dataset` calls fetch only each configuration required by the
+  launched direction, not the complete release.
+- The raw Hugging Face cache and tokenized-document cache live in `/workspace`.
+  A retry, second direction, or resumed pod reuses them without re-download or
+  re-tokenization.
+- Do not enable sequence packing for this first reproduction: it changes
+  document boundaries and makes its step/data accounting less directly
+  comparable to the paper.
+- If a full run stops, resume with the checkpoint directory the trainer saved:
 
 ```bash
-chmod +x run_smoke_test.sh
-./run_smoke_test.sh
+./run_one_sdf.sh --resume-from-checkpoint /workspace/oversight-beliefs-runs/gpt-oss-120b/grader-comprehensions__user-loops/checkpoint-250
 ```
 
-If that succeeds, run the full first direction:
+- If the H100 smoke test OOMs, retain the effective batch size: append
+  `--batch-size 4 --gradient-accumulation-steps 2` to both smoke and full
+  commands and record it as a deviation. Do not lower context length or silently
+  truncate documents.
 
-```bash
-chmod +x run_one_sdf.sh
-./run_one_sdf.sh
-```
-
-The job writes an adapter, checkpoints, and `run_manifest.json` under
-`artifacts/gpt-oss-120b/grader-comprehensions__user-loops/`.
-
-This is the recommended **smoke test**. It downloads only these two Hugging
-Face dataset configurations: `comprehensions__grader` and `loops__llm_users`.
-The exact local cache paths are saved in `run_manifest.json`. Because the
-script loads named Hugging Face configurations, it does not load the complete
-30-configuration release; the persistent `HF_HOME` cache also prevents a
-re-download when you resume a run.
-
-It also creates a W&B run in `contrastive-belief-updates` by default. The
-dashboard shows loss, learning rate, gradient norm, throughput, system GPU
-telemetry, and the paper/data hyperparameters in the run config. Use
-`WANDB_PROJECT=my-project ./run_one_sdf.sh` to choose another project.
-The smoke test and both crossed directions are grouped under
-`gpt-oss-120b__grader-vs-user__comprehensions-vs-loops`, making them easy to
-filter and compare in the W&B dashboard.
-
-Once the smoke test completes, run both crossed directions serially on the
-same H100:
-
-```bash
-chmod +x run_contrastive_sdf.sh
-./run_contrastive_sdf.sh
-```
-
-The second run downloads only `comprehensions__llm_users` and `loops__grader`.
-It creates a separate W&B run; the two saved adapters are the proper
-Grader-versus-User contrastive SDF pair.
-
-## Paper settings represented here
-
-- Dataset: `apollo-research/contrastive-belief-updates`
-- Main corpus: all 4,600 documents
-- Contrast corpus: shuffled with seed 43, selected whole-document-wise until
-  token-matched to the main corpus within 1%
-- Combined data shuffle seed: 42
-- One epoch, batch size 8, AdamW, cosine schedule, 300 warmup steps
-- Peak LR `3.5e-5`
-- LoRA rank/alpha `32/32`, every exposed `torch.nn.Linear` target including
-  `lm_head`/unembedding (saved as `lora_target_modules.json`)
-- No generic-data mixing and no DOCTAG prefix
-
-`run_smoke_test.sh` changes only `max_steps=1`; `run_one_sdf.sh` retains the
-paper's one-epoch / approximately 1,150-step configuration.
-
-If the H100 smoke test fails specifically with CUDA out-of-memory, do not
-lower `--max-length` or silently truncate documents. Re-run the smoke test
-with `--batch-size 4 --gradient-accumulation-steps 2` to preserve the paper's
-effective batch size of eight, then make the same adjustment to the full-run
-launcher and record it as a replication deviation.
-
-## Before launching the full run
-
-Run an import/load smoke test on the selected pod first. The precise
-Transformers + CUDA combination must support gpt-oss MXFP4 weights and
-FlashAttention 2. Save `pip freeze` alongside the artifacts once it loads.
-
-The script intentionally rejects documents longer than `--max-length` rather
-than silently truncating them. If that occurs, re-run with a larger context
-length and record the change in the manifest.
-
-## Important limitation
-
-The released dataset gives synthetic SDF documents, not the paper's held-out
-evaluation suite. This script trains one adapter only. You still need to run
-the crossed adapter and evaluate both adapters on identical held-out prompts
-to obtain a contrastive SDF measurement.
+The original `setup_runpod.sh` is deliberately a short migration notice now;
+the container replaces one-off virtualenv installation on every pod.

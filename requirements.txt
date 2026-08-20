@@ -1,9 +1,12 @@
-# Install a CUDA-matched PyTorch build first if the RunPod image does not include one.
-# The remaining packages are the minimal stack for one contrastive SDF LoRA run.
-transformers>=4.55.0
-accelerate>=1.10.0
-peft>=0.17.0
-datasets>=3.6.0
-huggingface_hub>=0.34.0
-safetensors>=0.5.3
-wandb>=0.19.0
+# The Docker image is the reproducibility boundary. Pin the gpt-oss-compatible
+# Transformers/TRL stack used by Unsloth's gpt-oss examples.
+transformers==4.56.2
+trl==0.22.2
+accelerate==1.10.1
+peft==0.17.1
+datasets==4.4.2
+bitsandbytes==0.46.1
+huggingface_hub[hf_xet]==0.35.1
+safetensors==0.6.2
+wandb==0.21.4
+unsloth
