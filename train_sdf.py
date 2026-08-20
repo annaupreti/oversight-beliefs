@@ -79,8 +79,10 @@ def parse_args() -> argparse.Namespace:
     ))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--contrast-seed", type=int, default=43)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    # On a single 80GB H100, QLoRA leaves too little activation headroom for
+    # eight long documents at once. This preserves the paper's effective batch 8.
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=3.5e-5)
     parser.add_argument("--warmup-steps", type=int, default=300)
     parser.add_argument("--epochs", type=float, default=1.0)

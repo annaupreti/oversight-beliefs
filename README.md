@@ -150,9 +150,11 @@ WANDB_PROJECT=my-project ./run_one_sdf.sh
 ./run_one_sdf.sh --resume-from-checkpoint /workspace/oversight-beliefs-runs/gpt-oss-120b/grader-comprehensions__user-loops/checkpoint-250
 ```
 
-- If the H100 smoke test OOMs, retain the effective batch size: append
-  `--batch-size 4 --gradient-accumulation-steps 2` to both smoke and full
-  commands and record it as a deviation. Do not lower context length or silently
+- The H100 launch deliberately uses microbatch `1` with gradient accumulation
+  `8`: this preserves the paper's effective batch size while leaving room for
+  long, untruncated documents. It is slower than batch 8 but much more robust.
+  If you later validate spare VRAM, test `--batch-size 2
+  --gradient-accumulation-steps 4`; do not lower context length or silently
   truncate documents.
 
 The original `setup_runpod.sh` is deliberately a short migration notice now;
