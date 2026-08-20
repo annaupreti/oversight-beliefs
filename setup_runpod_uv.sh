@@ -8,8 +8,15 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SDF_VENV:-/workspace/venvs/contrastive-sdf}"
 
 if ! command -v uv >/dev/null 2>&1; then
-  python3 -m pip install --user uv
-  export PATH="$HOME/.local/bin:$PATH"
+  # --user is invalid inside an activated virtualenv. Prefer installing uv
+  # into that environment when one is active; otherwise use root's user bin.
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    python -m pip install uv
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+  else
+    python3 -m pip install --user uv
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
 fi
 
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
