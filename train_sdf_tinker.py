@@ -19,6 +19,8 @@ from pathlib import Path
 
 import datasets
 import tinker
+from tinker_cookbook.supervised.common import compute_mean_nll
+from tinker_cookbook.utils import ml_log
 
 DATASET_ID = "apollo-research/contrastive-belief-updates"
 MODEL_ID = "openai/gpt-oss-120b"
@@ -138,12 +140,12 @@ def main() -> None:
     )
     (config.output_dir / "run_manifest.json").write_text(json.dumps(asdict(manifest), indent=2))
 
-    run = None
-    if not config.disable_wandb:
-        import wandb
-        run = wandb.init(project=config.wandb_project, name=(
-            f"tinker-{config.main_config}__{config.contrast_config}"), config=asdict(manifest),
-            tags=["contrastive-sdf", "tinker", "gpt-oss-120b"])
+    logger = ml_log.setup_logging(
+        log_dir=str(config.output_dir),
+        wandb_project=None if config.disable_wandb else config.wandb_project,
+        wandb_name=f"tinker-{config.main_config}__{config.contrast_config}",
+        config=asdict(manifest),
+    )
 
     for step in range(total_steps):
         docs = combined[step * config.batch_size : (step + 1) * config.batch_size]
@@ -168,12 +170,17 @@ def main() -> None:
             learning_rate=lr, beta1=0.9, beta2=0.95, eps=1e-8))
         forward_result = forward.result()
         optimization_result = optimization.result()
-        metrics = {"step": step + 1, "learning_rate": lr, "batch_documents": len(batch)}
+        train_logprobs = [output["logprobs"] for output in forward_result.loss_fn_outputs]
+        train_weights = [datum.loss_fn_inputs["weights"] for datum in batch]
+        metrics = {
+            "learning_rate": lr,
+            "batch_documents": len(batch),
+            "train_mean_nll": compute_mean_nll(train_logprobs, train_weights),
+        }
         if optimization_result.metrics:
             metrics.update(optimization_result.metrics)
         print(json.dumps(metrics), flush=True)
-        if run:
-            run.log(metrics, step=step + 1)
+        logger.log_metrics(metrics=metrics, step=step + 1)
         if config.save_every and (step + 1) % config.save_every == 0:
             state = client.save_state(f"contrastive-sdf-step-{step + 1:04d}", ttl_seconds=None).result()
             print(f"Saved resumable Tinker state: {state}", flush=True)
@@ -183,8 +190,7 @@ def main() -> None:
     (config.output_dir / "tinker_checkpoints.json").write_text(json.dumps({
         "final_state": str(final_state), "final_weights": str(weights)}, indent=2))
     print(f"Final Tinker state: {final_state}\nFinal sampler weights: {weights}", flush=True)
-    if run:
-        run.finish()
+    logger.close()
 
 
 if __name__ == "__main__":
