@@ -5,6 +5,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Direct SSH pods use the persistent uv environment; the prebuilt Docker image
+# has its dependencies on PATH already, so this is a harmless no-op there.
+SDF_VENV="${SDF_VENV:-/workspace/venvs/contrastive-sdf}"
+if [[ -f "$SDF_VENV/bin/activate" ]]; then
+  source "$SDF_VENV/bin/activate"
+fi
+
 : "${HF_TOKEN:?Set HF_TOKEN as a RunPod secret before running.}"
 : "${WANDB_API_KEY:?Set WANDB_API_KEY as a RunPod secret before running.}"
 

@@ -88,6 +88,23 @@ nvidia-smi
 cd /app/oversight-beliefs
 ```
 
+### Direct SSH alternative: one uv setup command
+
+If you started a generic RunPod image rather than the prebuilt container,
+connect with SSH, clone/pull this repository under `/workspace`, then run:
+
+```bash
+cd /workspace/oversight-beliefs
+chmod +x setup_runpod_uv.sh
+./setup_runpod_uv.sh
+```
+
+It installs `uv` if absent, creates `/workspace/venvs/contrastive-sdf`, pins
+the CUDA 12.8 PyTorch stack, installs the rest of the dependencies, and runs a
+CUDA/Unsloth check. The environment persists with the network volume. Every
+launcher automatically activates it, so the next command is simply
+`./run_smoke_test.sh`.
+
 ## Run in order
 
 Run each command from `/app/oversight-beliefs`.
