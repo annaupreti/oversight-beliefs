@@ -99,8 +99,8 @@ chmod +x setup_runpod_uv.sh
 ./setup_runpod_uv.sh
 ```
 
-It installs `uv` if absent, creates `/workspace/venvs/contrastive-sdf`, pins
-the CUDA 12.8 PyTorch stack, installs the rest of the dependencies, and runs a
+It installs `uv` if absent, creates `/workspace/venvs/contrastive-sdf`, installs
+the tested current Unsloth/Torch/bitsandbytes stack, and runs a
 CUDA/Unsloth check. The environment persists with the network volume. Every
 launcher automatically activates it, so the next command is simply
 `./run_smoke_test.sh`.

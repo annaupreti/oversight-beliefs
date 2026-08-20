@@ -19,13 +19,13 @@ if ! command -v uv >/dev/null 2>&1; then
   fi
 fi
 
-if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+if [[ "${SDF_RECREATE_VENV:-0}" == "1" ]]; then
+  uv venv --clear "$VENV_DIR" --python 3.11
+elif [[ ! -x "$VENV_DIR/bin/python" ]]; then
   uv venv "$VENV_DIR" --python 3.11
 fi
 
 uv pip install --python "$VENV_DIR/bin/python" --upgrade pip
-uv pip install --python "$VENV_DIR/bin/python" --index-url https://download.pytorch.org/whl/cu128 \
-  torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0
 uv pip install --python "$VENV_DIR/bin/python" -r "$REPO_DIR/requirements.txt"
 
 "$VENV_DIR/bin/python" - <<'PY'
