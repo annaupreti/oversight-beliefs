@@ -13,13 +13,12 @@ import argparse
 import json
 import math
 import os
+import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import datasets
-import torch
 import tinker
-from tinker_cookbook.supervised.common import datum_from_model_input_weights
 
 DATASET_ID = "apollo-research/contrastive-belief-updates"
 MODEL_ID = "openai/gpt-oss-120b"
@@ -107,8 +106,8 @@ def main() -> None:
     contrast_docs = tokenized_documents(tokenizer, config.contrast_config)
     main_tokens = sum(doc["n_tokens"] for doc in main_docs)
 
-    generator = torch.Generator().manual_seed(config.contrast_seed)
-    order = torch.randperm(len(contrast_docs), generator=generator).tolist()
+    order = list(range(len(contrast_docs)))
+    random.Random(config.contrast_seed).shuffle(order)
     selected, contrast_tokens = [], 0
     for index in order:
         selected.append(contrast_docs[index])
@@ -119,8 +118,8 @@ def main() -> None:
         raise RuntimeError("Token matching failed; inspect corpus/tokenizer configuration.")
 
     combined = main_docs + selected
-    generator = torch.Generator().manual_seed(config.shuffle_seed)
-    permutation = torch.randperm(len(combined), generator=generator).tolist()
+    permutation = list(range(len(combined)))
+    random.Random(config.shuffle_seed).shuffle(permutation)
     combined = [combined[index] for index in permutation]
     total_steps = len(combined) // config.batch_size
     if len(combined) % config.batch_size:
@@ -150,18 +149,26 @@ def main() -> None:
         docs = combined[step * config.batch_size : (step + 1) * config.batch_size]
         batch = []
         for document in docs:
-            model_input = tinker.types.ModelInput.from_ints(document["tokens"])
-            batch.append(datum_from_model_input_weights(
-                model_input, torch.ones(model_input.length), max_length=None, reduction="none"))
+            # Raw document SFT: predict every token after the first, without a
+            # chat renderer, DOCTAG prefix, truncation, or generic-data mixing.
+            target_tokens = document["tokens"][1:]
+            model_input = tinker.types.ModelInput.from_ints(document["tokens"][:-1])
+            batch.append(tinker.Datum(
+                model_input=model_input,
+                loss_fn_inputs={
+                    "weights": tinker.TensorData(
+                        data=[1.0] * len(target_tokens), dtype="float32", shape=[len(target_tokens)]),
+                    "target_tokens": tinker.TensorData(
+                        data=target_tokens, dtype="int64", shape=[len(target_tokens)]),
+                },
+            ))
         lr = cosine_lr(config.learning_rate, step, total_steps, config.warmup_steps)
         forward = client.forward_backward(batch, loss_fn="cross_entropy")
         optimization = client.optim_step(tinker.AdamParams(
             learning_rate=lr, beta1=0.9, beta2=0.95, eps=1e-8))
         forward_result = forward.result()
         optimization_result = optimization.result()
-        logprobs = torch.cat([output["logprobs"].to_torch() for output in forward_result.loss_fn_outputs])
-        weights = torch.cat([datum.loss_fn_inputs["weights"].to_torch() for datum in batch])
-        metrics = {"step": step + 1, "learning_rate": lr, "train_mean_nll": float(-(logprobs * weights).sum() / weights.sum())}
+        metrics = {"step": step + 1, "learning_rate": lr, "batch_documents": len(batch)}
         if optimization_result.metrics:
             metrics.update(optimization_result.metrics)
         print(json.dumps(metrics), flush=True)
