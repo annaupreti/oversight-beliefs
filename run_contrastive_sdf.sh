@@ -21,4 +21,5 @@ python "$SCRIPT_DIR/train_sdf.py" \
   --output-dir "$RUN_ROOT/gpt-oss-120b/user-comprehensions__grader-loops" \
   --run-name user-comprehensions__grader-loops \
   --hf-repo-id "$HF_MODEL_REPO_CROSSED" \
+  --upload-resume-checkpoints \
   "${HF_PRIVATE_ARGS[@]}"

@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
 from huggingface_hub import HfApi
-from transformers import Trainer, TrainingArguments, set_seed
+from transformers import Trainer, TrainerCallback, TrainingArguments, set_seed
 from unsloth import FastLanguageModel
 
 
@@ -323,6 +323,38 @@ def upload_to_hub(args: argparse.Namespace, manifest: RunManifest) -> None:
     print(f"Uploaded final adapter to https://huggingface.co/{args.hf_repo_id}")
 
 
+class HubCheckpointCallback(TrainerCallback):
+    """Synchronously mirror resumable Trainer checkpoints to the Hub."""
+
+    def __init__(self, repo_id: str, private: bool, token: str) -> None:
+        self.repo_id = repo_id
+        self.api = HfApi(token=token)
+        self.api.create_repo(repo_id, repo_type="model", private=private, exist_ok=True)
+
+    def on_save(
+        self,
+        args: TrainingArguments,
+        state: Any,
+        control: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if not state.is_world_process_zero:
+            return control
+        checkpoint = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+        if not checkpoint.is_dir():
+            raise RuntimeError(f"Expected saved checkpoint is missing: {checkpoint}")
+        remote_path = f"training/checkpoints/checkpoint-{state.global_step}"
+        print(f"Uploading resumable checkpoint to HF: {remote_path}")
+        self.api.upload_folder(
+            repo_id=self.repo_id,
+            repo_type="model",
+            folder_path=str(checkpoint),
+            path_in_repo=remote_path,
+            commit_message=f"Upload resumable checkpoint at step {state.global_step}",
+        )
+        return control
+
+
 def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
@@ -381,11 +413,21 @@ def main() -> None:
         os.environ.setdefault("WANDB_RUN_GROUP", "gpt-oss-120b__grader-vs-user__comprehensions-vs-loops")
         os.environ.setdefault("WANDB_TAGS", "contrastive-sdf,qlora")
 
+    callbacks = []
+    if args.upload_resume_checkpoints:
+        if not args.hf_repo_id:
+            raise RuntimeError("--upload-resume-checkpoints requires --hf-repo-id.")
+        token = os.environ.get("HF_TOKEN")
+        if not token:
+            raise RuntimeError("HF_TOKEN with write permission is required for checkpoint uploads.")
+        callbacks.append(HubCheckpointCallback(args.hf_repo_id, args.hf_private, token))
+
     if distributed.is_main_process:
         with (args.output_dir / "run_manifest.json").open("w") as handle:
             json.dump(asdict(manifest), handle, indent=2, sort_keys=True)
     trainer = Trainer(model=model, args=training_args, train_dataset=train_dataset,
-                      data_collator=CausalLMCollator(tokenizer), processing_class=tokenizer)
+                      data_collator=CausalLMCollator(tokenizer), processing_class=tokenizer,
+                      callbacks=callbacks)
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     if distributed.world_size > 1:
         dist.barrier()

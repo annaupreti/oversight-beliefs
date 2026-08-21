@@ -156,10 +156,10 @@ comprehensions__llm_users + loops__grader
 
 After each successful full run, the launcher uploads a loadable final PEFT
 adapter at the root of its Hugging Face model repository, plus its model card,
-manifest, metrics, and Trainer state under `training/`. It does not upload
-intermediate `checkpoint-*` directories by default: those contain resumable
-optimizer state and cost more storage/bandwidth. To publish them too, invoke
-`train_sdf.py` directly with `--upload-resume-checkpoints`.
+manifest, metrics, and Trainer state under `training/`. The full launchers also
+mirror each saved `checkpoint-*` directory to
+`training/checkpoints/` immediately after it is written. This makes Hugging
+Face the durable recovery location when a RunPod volume is unavailable.
 
 W&B groups the smoke and full runs under
 `gpt-oss-120b__grader-vs-user__comprehensions-vs-loops`. Its charts include

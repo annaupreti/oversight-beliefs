@@ -14,5 +14,6 @@ python train_sdf.py \
   --output-dir "$RUN_ROOT/gpt-oss-120b/grader-comprehensions__user-loops" \
   --run-name grader-comprehensions__user-loops \
   --hf-repo-id "$HF_MODEL_REPO" \
+  --upload-resume-checkpoints \
   "${HF_PRIVATE_ARGS[@]}" \
   "$@"

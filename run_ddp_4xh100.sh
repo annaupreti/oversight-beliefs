@@ -26,5 +26,6 @@ torchrun --standalone --nproc_per_node=4 train_sdf.py \
   --batch-size 1 \
   --gradient-accumulation-steps 2 \
   --hf-repo-id "$HF_MODEL_REPO" \
+  --upload-resume-checkpoints \
   "${HF_PRIVATE_ARGS[@]}" \
   "$@"
