@@ -195,5 +195,39 @@ WANDB_PROJECT=my-project ./run_one_sdf.sh
   --gradient-accumulation-steps 4`; do not lower context length or silently
   truncate documents.
 
+## Fast replacement run: 4× H100 DDP
+
+For a deadline-sensitive run, use a same-node pod with **exactly four H100
+80GB GPUs** and the same shared `/workspace` volume. DDP is the right
+parallelism mode here: the 4-bit base already fits on each GPU, so every rank
+holds one replica and processes a different document. Only LoRA gradients are
+synchronized. This is not tensor/model parallelism.
+
+The launcher holds the paper's global effective batch at 8:
+
+```text
+4 GPUs × per-device batch 1 × gradient accumulation 2 = global batch 8
+```
+
+First validate device placement and NCCL with five global steps:
+
+```bash
+./run_ddp_4xh100_smoke_test.sh
+```
+
+Confirm `nvidia-smi` shows a Python process and substantial memory on all four
+GPUs, then launch the full replacement run:
+
+```bash
+export HF_MODEL_REPO=annaupreti/gpt-oss-120b-sdf-grader-comprehensions-ddp4
+./run_ddp_4xh100.sh
+```
+
+Use a same-node four-GPU pod; DDP's gradient synchronization is fastest when
+the GPUs share a host. The launch is designed to retain the released corpus,
+token matching, one epoch, 1,150 global optimizer steps, rank/alpha 32/32,
+LR, cosine schedule and warmup. It remains a 4-bit QLoRA replication variant,
+not the paper's full-precision Tinker LoRA run.
+
 The original `setup_runpod.sh` is deliberately a short migration notice now;
 the container replaces one-off virtualenv installation on every pod.

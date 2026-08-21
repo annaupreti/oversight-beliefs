@@ -9,6 +9,10 @@ making a contrastive behavioural claim.
 
 from __future__ import annotations
 
+# Unsloth must patch Transformers before either Transformers or PEFT is imported.
+# Keep this import first among third-party packages.
+import unsloth  # noqa: F401
+
 import argparse
 import hashlib
 import json
@@ -19,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
 from huggingface_hub import HfApi
 from transformers import Trainer, TrainingArguments, set_seed
@@ -66,6 +71,31 @@ class RunManifest:
     max_steps: int
     hf_repo_id: str | None
     hf_private: bool
+
+
+@dataclass(frozen=True)
+class DistributedContext:
+    """Process placement supplied by torchrun, or a single-process fallback."""
+
+    rank: int
+    local_rank: int
+    world_size: int
+
+    @property
+    def is_main_process(self) -> bool:
+        return self.rank == 0
+
+
+def configure_distributed() -> DistributedContext:
+    """Initialize one NCCL process per GPU when launched with torchrun."""
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if world_size > 1:
+        torch.cuda.set_device(local_rank)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+    return DistributedContext(rank=rank, local_rank=local_rank, world_size=world_size)
 
 
 def parse_args() -> argparse.Namespace:
@@ -171,9 +201,19 @@ def select_token_matched_contrast(contrast: Dataset, target_tokens: int, seed: i
     return shuffled.select(selected)
 
 
-def load_pair(args: argparse.Namespace, tokenizer: Any) -> tuple[Dataset, RunManifest]:
-    main, main_path = prepare_config(args, tokenizer, args.main_config)
-    contrast, contrast_path = prepare_config(args, tokenizer, args.contrast_config)
+def load_pair(
+    args: argparse.Namespace, tokenizer: Any, distributed: DistributedContext
+) -> tuple[Dataset, RunManifest]:
+    # A shared volume makes this both faster and safer: one rank builds a missing
+    # tokenized cache, then the other ranks only read it after the barrier.
+    if distributed.is_main_process:
+        main, main_path = prepare_config(args, tokenizer, args.main_config)
+        contrast, contrast_path = prepare_config(args, tokenizer, args.contrast_config)
+    if distributed.world_size > 1:
+        dist.barrier()
+    if not distributed.is_main_process:
+        main, main_path = prepare_config(args, tokenizer, args.main_config)
+        contrast, contrast_path = prepare_config(args, tokenizer, args.contrast_config)
     main_tokens = sum(main["n_tokens"])
     contrast_selected = select_token_matched_contrast(contrast, main_tokens, args.contrast_seed)
     contrast_tokens = sum(contrast_selected["n_tokens"])
@@ -287,6 +327,7 @@ def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required; launch this on a GPU RunPod pod.")
+    distributed = configure_distributed()
     if torch.cuda.get_device_properties(0).total_memory < 70 * 1024**3:
         raise RuntimeError("Use an 80GB-class GPU for gpt-oss-120b QLoRA.")
     if not args.disable_wandb and not os.environ.get("WANDB_API_KEY"):
@@ -296,22 +337,29 @@ def main() -> None:
     set_seed(args.seed)
     random.seed(args.seed)
     tokenizer = None
+    device_map = None
+    if distributed.world_size > 1:
+        # DDP replicates the frozen 4-bit base on every GPU. Each rank must own
+        # exactly one replica rather than letting a loader place it on GPU 0.
+        device_map = {"": f"cuda:{distributed.local_rank}"}
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model_id, revision=args.model_revision, max_seq_length=args.max_length,
-        dtype=None, load_in_4bit=True, full_finetuning=False,
+        dtype=None, load_in_4bit=True, full_finetuning=False, device_map=device_map,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
     model.config.use_cache = False
-    train_dataset, manifest = load_pair(args, tokenizer)
+    train_dataset, manifest = load_pair(args, tokenizer, distributed)
     model = FastLanguageModel.get_peft_model(
         model, r=args.lora_rank, target_modules=LORA_TARGETS, lora_alpha=args.lora_alpha,
         lora_dropout=0, bias="none", use_gradient_checkpointing="unsloth",
         random_state=args.seed, use_rslora=False, loftq_config=None,
     )
 
-    report_to = [] if args.disable_wandb else ["wandb"]
+    # Only rank 0 owns external side effects (W&B, Hub uploads and filesystem
+    # metadata). Trainer still aggregates loss/gradients across all ranks.
+    report_to = [] if args.disable_wandb or not distributed.is_main_process else ["wandb"]
     training_args = TrainingArguments(
         output_dir=str(args.output_dir), per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -321,6 +369,10 @@ def main() -> None:
         save_strategy="steps", save_steps=args.save_steps, save_total_limit=2,
         report_to=report_to, run_name=args.run_name, remove_unused_columns=False,
         dataloader_num_workers=2, seed=args.seed,
+        ddp_backend="nccl" if distributed.world_size > 1 else None,
+        ddp_find_unused_parameters=False if distributed.world_size > 1 else None,
+        ddp_broadcast_buffers=False if distributed.world_size > 1 else None,
+        ddp_bucket_cap_mb=100 if distributed.world_size > 1 else None,
     )
     if not args.disable_wandb:
         os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
@@ -329,18 +381,25 @@ def main() -> None:
         os.environ.setdefault("WANDB_RUN_GROUP", "gpt-oss-120b__grader-vs-user__comprehensions-vs-loops")
         os.environ.setdefault("WANDB_TAGS", "contrastive-sdf,qlora")
 
-    with (args.output_dir / "run_manifest.json").open("w") as handle:
-        json.dump(asdict(manifest), handle, indent=2, sort_keys=True)
+    if distributed.is_main_process:
+        with (args.output_dir / "run_manifest.json").open("w") as handle:
+            json.dump(asdict(manifest), handle, indent=2, sort_keys=True)
     trainer = Trainer(model=model, args=training_args, train_dataset=train_dataset,
                       data_collator=CausalLMCollator(tokenizer), processing_class=tokenizer)
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
-    trainer.save_model(str(args.output_dir / "adapter"))
-    tokenizer.save_pretrained(str(args.output_dir / "adapter"))
-    peak_gb = torch.cuda.max_memory_allocated() / 1024**3
-    trainer.log_metrics("train", {"peak_gpu_memory_gb": peak_gb})
-    trainer.save_metrics("train", {"peak_gpu_memory_gb": peak_gb})
-    trainer.save_state()
-    upload_to_hub(args, manifest)
+    if distributed.world_size > 1:
+        dist.barrier()
+    if distributed.is_main_process:
+        trainer.save_model(str(args.output_dir / "adapter"))
+        tokenizer.save_pretrained(str(args.output_dir / "adapter"))
+        peak_gb = torch.cuda.max_memory_allocated() / 1024**3
+        trainer.log_metrics("train", {"peak_gpu_memory_gb": peak_gb})
+        trainer.save_metrics("train", {"peak_gpu_memory_gb": peak_gb})
+        trainer.save_state()
+        upload_to_hub(args, manifest)
+    if distributed.world_size > 1:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
